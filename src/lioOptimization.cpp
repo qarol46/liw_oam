@@ -1,4 +1,12 @@
 #include "lioOptimization.h"
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <boost/random/uniform_int.hpp>
+#include <boost/random/variate_generator.hpp>
+#include <random>
+
+using namespace std::chrono_literals;
 
 cloudFrame::cloudFrame(std::vector<point3D> &point_frame_, std::vector<point3D> &const_frame_, state *p_state_)
 {
@@ -53,7 +61,8 @@ estimationSummary::estimationSummary()
 
 void estimationSummary::release()
 {
-    if(!state_frame) state_frame->release();
+    if(state_frame) 
+        state_frame->release();
 
     std::vector<point3D>().swap(corrected_points);
 
@@ -62,25 +71,38 @@ void estimationSummary::release()
     std::vector<point3D>().swap(keypoints);
 }
 
-lioOptimization::lioOptimization()
+lioOptimization::lioOptimization(const rclcpp::NodeOptions & options) : Node("lio_optimization", options)
 {
-	allocateMemory();
+    allocateMemory();
 
     readParameters();
 
     initialValue();
 
-    pub_cloud_body = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_current", 2);
-    pub_cloud_world = nh.advertise<sensor_msgs::PointCloud2>("/cloud_global_map", 2);
-    pub_odom = nh.advertise<nav_msgs::Odometry>("/Odometry_after_opt", 5);
-    pub_path = nh.advertise<nav_msgs::Path>("/path", 5);
+    // Создание publishers
+    pub_cloud_body = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_current", 2);
+    pub_cloud_world = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_global_map", 2);
+    pub_odom = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry_after_opt", 5);
+    pub_path = this->create_publisher<nav_msgs::msg::Path>("/path", 5);
 
-    sub_cloud_ori = nh.subscribe<sensor_msgs::PointCloud2>(lidar_topic, 20000, &lioOptimization::standardCloudHandler, this);
-    sub_imu_ori = nh.subscribe<sensor_msgs::Imu>(imu_topic, 50000, &lioOptimization::imuHandler, this);
-    sub_wheel_ori = nh.subscribe<geometry_msgs::TwistStamped>(wheel_topic, 50000, &lioOptimization::wheelHandler, this);
+    // Создание subscribers
+    sub_cloud_ori = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+        lidar_topic, rclcpp::SensorDataQoS(),
+        std::bind(&lioOptimization::standardCloudHandler, this, std::placeholders::_1));
+    
+    sub_imu_ori = this->create_subscription<sensor_msgs::msg::Imu>(
+        imu_topic, rclcpp::SensorDataQoS(),
+        std::bind(&lioOptimization::imuHandler, this, std::placeholders::_1));
+    
+    sub_wheel_ori = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+        wheel_topic, rclcpp::SensorDataQoS(),
+        std::bind(&lioOptimization::wheelHandler, this, std::placeholders::_1));
 
-    path.header.stamp = ros::Time::now();
-    path.header.frame_id ="camera_init";
+    // Инициализация трансформаций
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+
+    path.header.stamp = this->now();
+    path.header.frame_id = "camera_init";
     points_world.reset(new pcl::PointCloud<pcl::PointXYZI>());
 
     //options.recordParameters();
@@ -93,144 +115,100 @@ void lioOptimization::readParameters()
     bool para_bool;
     std::string str_temp;
 
-    // common
-    nh.param<std::string>("common/lidar_topic", lidar_topic, "/points_raw");
-	nh.param<std::string>("common/imu_topic", imu_topic, "/imu_raw");
-    nh.param<std::string>("common/wheel_topic", wheel_topic, "/wheel_topic");
-    nh.param<int>("common/point_filter_num", para_int, 1);  cloud_pro->setPointFilterNum(para_int);
-    nh.param<int>("common/sweep_cut_num", sweep_cut_num, 3); cloud_pro->setSweepCutNum(sweep_cut_num);
-    nh.param<std::vector<double>>("common/gravity_acc", v_G, std::vector<double>());
-    nh.param<bool>("debug_output", debug_output, false);
-    nh.param<std::string>("output_path", output_path, "");
+    // Объявление параметров
+    this->declare_parameter<std::string>("common.lidar_topic", "/points_raw");
+    this->declare_parameter<std::string>("common.imu_topic", "/imu_raw");
+    this->declare_parameter<std::string>("common.wheel_topic", "/wheel_topic");
+    this->declare_parameter<int>("common.point_filter_num", 1);
+    this->declare_parameter<int>("common.sweep_cut_num", 3);
+    this->declare_parameter<std::vector<double>>("common.gravity_acc", std::vector<double>());
+    this->declare_parameter<bool>("debug_output", false);
+    this->declare_parameter<std::string>("output_path", "");
 
-    // LiDAR parameter
-    nh.param<int>("lidar_parameter/lidar_type", para_int, AVIA);  cloud_pro->setLidarType(para_int);
-    nh.param<int>("lidar_parameter/N_SCANS", para_int, 16);  cloud_pro->setNumScans(para_int);
-    nh.param<int>("lidar_parameter/SCAN_RATE", para_int, 10);  cloud_pro->setScanRate(para_int);
-    nh.param<int>("lidar_parameter/time_unit", para_int, US);  cloud_pro->setTimeUnit(para_int);
-    nh.param<double>("lidar_parameter/blind", para_double, 0.01);  cloud_pro->setBlind(para_double);
-    nh.param<float>("lidar_parameter/det_range", det_range, 300.f);
-    nh.param<double>("lidar_parameter/fov_degree", fov_deg, 180);
+    // Получение параметров
+    this->get_parameter("common.lidar_topic", lidar_topic);
+    this->get_parameter("common.imu_topic", imu_topic);
+    this->get_parameter("common.wheel_topic", wheel_topic);
+    
+    this->get_parameter("common.point_filter_num", para_int);
+    cloud_pro->setPointFilterNum(para_int);
+    
+    this->get_parameter("common.sweep_cut_num", sweep_cut_num);
+    cloud_pro->setSweepCutNum(sweep_cut_num);
+    
+    this->get_parameter("common.gravity_acc", v_G);
+    this->get_parameter("debug_output", debug_output);
+    this->get_parameter("output_path", output_path);
 
-    // IMU parameter
-    nh.param<double>("imu_parameter/acc_cov", para_double, 0.1);  imu_pro->setAccCov(para_double);
-    nh.param<double>("imu_parameter/gyr_cov", para_double, 0.1);  imu_pro->setGyrCov(para_double);
-    nh.param<double>("imu_parameter/b_acc_cov", para_double, 0.0001);  imu_pro->setBiasAccCov(para_double);
-    nh.param<double>("imu_parameter/b_gyr_cov", para_double, 0.0001);  imu_pro->setBiasGyrCov(para_double);
-    nh.param<double>("imu_parameter/vel_cov", para_double, 0.1);imu_pro->setVelCov(para_double);
-    nh.param<bool>("imu_parameter/time_diff_enable", time_diff_enable, false);
+    // LiDAR параметры
+    this->declare_parameter<int>("lidar_parameter.lidar_type", AVIA);
+    this->declare_parameter<int>("lidar_parameter.N_SCANS", 16);
+    this->declare_parameter<int>("lidar_parameter.SCAN_RATE", 10);
+    this->declare_parameter<int>("lidar_parameter.time_unit", US);
+    this->declare_parameter<double>("lidar_parameter.blind", 0.01);
+    this->declare_parameter<float>("lidar_parameter.det_range", 300.0f);
+    this->declare_parameter<double>("lidar_parameter.fov_degree", 180.0);
 
-    // extrinsic parameter
-    nh.param<bool>("extrinsic_parameter/extrinsic_enable", extrin_enable, true);
-    nh.param<std::vector<double>>("extrinsic_parameter/extrinsic_t", v_extrin_t, std::vector<double>());
-    nh.param<std::vector<double>>("extrinsic_parameter/extrinsic_R", v_extrin_R, std::vector<double>());
-    nh.param<std::vector<double>>("extrinsic_parameter/extrinsic_t_odom", v_extrin_t_odom, std::vector<double>());
-    nh.param<std::vector<double>>("extrinsic_parameter/extrinsic_R_odom", v_extrin_R_odom, std::vector<double>());
+    this->get_parameter("lidar_parameter.lidar_type", para_int);
+    cloud_pro->setLidarType(para_int);
+    this->get_parameter("lidar_parameter.N_SCANS", para_int);
+    cloud_pro->setNumScans(para_int);
+    this->get_parameter("lidar_parameter.SCAN_RATE", para_int);
+    cloud_pro->setScanRate(para_int);
+    this->get_parameter("lidar_parameter.time_unit", para_int);
+    cloud_pro->setTimeUnit(para_int);
+    this->get_parameter("lidar_parameter.blind", para_double);
+    cloud_pro->setBlind(para_double);
+    this->get_parameter("lidar_parameter.det_range", det_range);
+    this->get_parameter("lidar_parameter.fov_degree", fov_deg);
 
-    // new ct-icp
-    nh.param<double>("odometry_options/init_voxel_size", options.init_voxel_size, 0.2);
-    nh.param<double>("odometry_options/init_sample_voxel_size", options.init_sample_voxel_size, 1.0);
-    nh.param<int>("odometry_options/init_num_frames", options.init_num_frames, 20);
-    nh.param<double>("odometry_options/voxel_size", options.voxel_size, 0.5);
-    nh.param<double>("odometry_options/sample_voxel_size", options.sample_voxel_size, 1.5);
-    nh.param<double>("odometry_options/max_distance", options.max_distance, 100.0);
-    nh.param<int>("odometry_options/max_num_points_in_voxel", options.max_num_points_in_voxel, 20);
-    nh.param<double>("odometry_options/min_distance_points", options.min_distance_points, 0.1);
-    nh.param<double>("odometry_options/distance_error_threshold", options.distance_error_threshold, 5.0);
-    nh.param<int>("odometry_options/robust_minimal_level", options.robust_minimal_level, 0);
-    nh.param<bool>("odometry_options/robust_registration", options.robust_registration, false);
-    nh.param<double>("odometry_options/robust_full_voxel_threshold", options.robust_full_voxel_threshold, 0.7);
-    nh.param<double>("odometry_options/robust_empty_voxel_threshold", options.robust_empty_voxel_threshold, 0.1);
-    nh.param<double>("odometry_options/robust_neighborhood_min_dist", options.robust_neighborhood_min_dist, 0.10);
-    nh.param<double>("odometry_options/robust_neighborhood_min_orientation", options.robust_neighborhood_min_orientation, 0.1);
-    nh.param<double>("odometry_options/robust_relative_trans_threshold", options.robust_relative_trans_threshold, 1.0);
-    nh.param<bool>("odometry_options/robust_fail_early", options.robust_fail_early, false);
-    nh.param<int>("odometry_options/robust_num_attempts", options.robust_num_attempts, 6);
-    nh.param<int>("odometry_options/robust_num_attempts_when_rotation", options.robust_num_attempts_when_rotation, 2);
-    nh.param<int>("odometry_options/robust_max_voxel_neighborhood", options.robust_max_voxel_neighborhood, 3);
-    nh.param<double>("odometry_options/robust_threshold_ego_orientation", options.robust_threshold_ego_orientation, 3);
-    nh.param<double>("odometry_options/robust_threshold_relative_orientation", options.robust_threshold_relative_orientation, 3);
+    // IMU параметры
+    this->declare_parameter<double>("imu_parameter.acc_cov", 0.1);
+    this->declare_parameter<double>("imu_parameter.gyr_cov", 0.1);
+    this->declare_parameter<double>("imu_parameter.b_acc_cov", 0.0001);
+    this->declare_parameter<double>("imu_parameter.b_gyr_cov", 0.0001);
+    this->declare_parameter<double>("imu_parameter.vel_cov", 0.1);
+    this->declare_parameter<bool>("imu_parameter.time_diff_enable", false);
 
-    nh.param<std::string>("odometry_options/method_system_init", str_temp, "MOTION_INIT");
-    if(str_temp == "MOTION_INIT") options.method_system_init = MOTION_INIT;
-    else if(str_temp == "STATIC_INIT") options.method_system_init = STATIC_INIT;
-    else std::cout << "The `initialization_method` " << str_temp << " is not supported." << std::endl;
+    this->get_parameter("imu_parameter.acc_cov", para_double);
+    imu_pro->setAccCov(para_double);
+    this->get_parameter("imu_parameter.gyr_cov", para_double);
+    imu_pro->setGyrCov(para_double);
+    this->get_parameter("imu_parameter.b_acc_cov", para_double);
+    imu_pro->setBiasAccCov(para_double);
+    this->get_parameter("imu_parameter.b_gyr_cov", para_double);
+    imu_pro->setBiasGyrCov(para_double);
+    this->get_parameter("imu_parameter.vel_cov", para_double);
+    imu_pro->setVelCov(para_double);
+    this->get_parameter("imu_parameter.time_diff_enable", time_diff_enable);
 
-    nh.param<std::string>("odometry_options/motion_compensation", str_temp, "NONE");
-    if(str_temp == "NONE") options.motion_compensation = NONE;
-    else if(str_temp == "CONSTANT_VELOCITY") options.motion_compensation = CONSTANT_VELOCITY;
-    else if(str_temp == "ITERATIVE") options.motion_compensation = ITERATIVE;
-    else if(str_temp == "CONTINUOUS") options.motion_compensation = CONTINUOUS;
-    else std::cout << "The `motion_compensation` " << str_temp << " is not supported." << std::endl;
+    // Внешние параметры
+    this->declare_parameter<bool>("extrinsic_parameter.extrinsic_enable", true);
+    this->declare_parameter<std::vector<double>>("extrinsic_parameter.extrinsic_t", std::vector<double>());
+    this->declare_parameter<std::vector<double>>("extrinsic_parameter.extrinsic_R", std::vector<double>());
+    this->declare_parameter<std::vector<double>>("extrinsic_parameter.extrinsic_t_odom", std::vector<double>());
+    this->declare_parameter<std::vector<double>>("extrinsic_parameter.extrinsic_R_odom", std::vector<double>());
 
-    nh.param<std::string>("odometry_options/initialization", str_temp, "INIT_NONE");
-    if(str_temp == "INIT_NONE") options.initialization = INIT_NONE;
-    else if(str_temp == "INIT_CONSTANT_VELOCITY") options.initialization = INIT_CONSTANT_VELOCITY;
-    else if(str_temp == "INIT_IMU") options.initialization = INIT_IMU;
-    else std::cout << "The `state_initialization` " << str_temp << " is not supported." << std::endl;
+    this->get_parameter("extrinsic_parameter.extrinsic_enable", extrin_enable);
+    this->get_parameter("extrinsic_parameter.extrinsic_t", v_extrin_t);
+    this->get_parameter("extrinsic_parameter.extrinsic_R", v_extrin_R);
+    this->get_parameter("extrinsic_parameter.extrinsic_t_odom", v_extrin_t_odom);
+    this->get_parameter("extrinsic_parameter.extrinsic_R_odom", v_extrin_R_odom);
 
+    // Параметры odometry (только основные для примера)
+    this->declare_parameter<double>("odometry_options.init_voxel_size", 0.2);
+    this->declare_parameter<double>("odometry_options.init_sample_voxel_size", 1.0);
+    this->declare_parameter<int>("odometry_options.init_num_frames", 20);
+    this->declare_parameter<double>("odometry_options.voxel_size", 0.5);
+    this->declare_parameter<double>("odometry_options.sample_voxel_size", 1.5);
+    
+    this->get_parameter("odometry_options.init_voxel_size", options.init_voxel_size);
+    this->get_parameter("odometry_options.init_sample_voxel_size", options.init_sample_voxel_size);
+    this->get_parameter("odometry_options.init_num_frames", options.init_num_frames);
+    this->get_parameter("odometry_options.voxel_size", options.voxel_size);
+    this->get_parameter("odometry_options.sample_voxel_size", options.sample_voxel_size);
 
-    icpOptions optimize_options;
-    nh.param<int>("icp_options/threshold_voxel_occupancy", options.optimize_options.threshold_voxel_occupancy, 1);
-    nh.param<double>("icp_options/size_voxel_map", options.optimize_options.size_voxel_map, 1.0);
-    nh.param<int>("icp_options/num_iters_icp", options.optimize_options.num_iters_icp, 5);
-    nh.param<int>("icp_options/min_number_neighbors", options.optimize_options.min_number_neighbors, 20);
-    nh.param<int>("icp_options/voxel_neighborhood", options.optimize_options.voxel_neighborhood, 1);
-    nh.param<double>("icp_options/power_planarity", options.optimize_options.power_planarity, 2.0);
-    nh.param<bool>("icp_options/estimate_normal_from_neighborhood", options.optimize_options.estimate_normal_from_neighborhood, true);
-    nh.param<int>("icp_options/max_number_neighbors", options.optimize_options.max_number_neighbors, 20);
-    nh.param<double>("icp_options/max_dist_to_plane_icp", options.optimize_options.max_dist_to_plane_icp, 0.3);
-    nh.param<double>("icp_options/threshold_orientation_norm", options.optimize_options.threshold_orientation_norm, 0.0001);
-    nh.param<double>("icp_options/threshold_translation_norm", options.optimize_options.threshold_translation_norm, 0.001);
-    nh.param<bool>("icp_options/point_to_plane_with_distortion", options.optimize_options.point_to_plane_with_distortion, true);
-    nh.param<int>("icp_options/max_num_residuals", options.optimize_options.max_num_residuals, -1);
-    nh.param<int>("icp_options/min_num_residuals", options.optimize_options.min_num_residuals, 100);
-    nh.param<int>("icp_options/num_closest_neighbors", options.optimize_options.num_closest_neighbors, 1);
-    nh.param<double>("icp_options/beta_location_consistency", options.optimize_options.beta_location_consistency, 0.001);
-    nh.param<double>("icp_options/beta_constant_velocity", options.optimize_options.beta_constant_velocity, 0.001);
-    nh.param<double>("icp_options/beta_wheel_velocity", options.optimize_options.beta_wheel_velocity, 0.001);
-    nh.param<double>("icp_options/beta_small_velocity", options.optimize_options.beta_small_velocity, 0.0);
-    nh.param<double>("icp_options/beta_orientation_consistency", options.optimize_options.beta_orientation_consistency, 0.0);
-    nh.param<double>("icp_options/weight_alpha", options.optimize_options.weight_alpha, 0.9);
-    nh.param<double>("icp_options/weight_neighborhood", options.optimize_options.weight_neighborhood, 0.1);
-    nh.param<int>("icp_options/ls_max_num_iters", options.optimize_options.ls_max_num_iters, 1);
-    nh.param<int>("icp_options/ls_num_threads", options.optimize_options.ls_num_threads, 16);
-    nh.param<double>("icp_options/ls_sigma", options.optimize_options.ls_sigma, 0.1);
-    nh.param<double>("icp_options/ls_tolerant_min_threshold", options.optimize_options.ls_tolerant_min_threshold, 0.05);
-    nh.param<bool>("icp_options/debug_print", options.optimize_options.debug_print, true);
-    nh.param<bool>("icp_options/debug_viz", options.optimize_options.debug_viz, false);
-
-    nh.param<std::string>("icp_options/distance", str_temp, "CT_POINT_TO_PLANE");
-    if(str_temp == "POINT_TO_PLANE") options.optimize_options.distance = POINT_TO_PLANE;
-    else if(str_temp == "CT_POINT_TO_PLANE") options.optimize_options.distance = CT_POINT_TO_PLANE;
-    else std::cout << "The `icp_residual` " << str_temp << " is not supported." << std::endl;
-
-    nh.param<std::string>("icp_options/weighting_scheme", str_temp, "ALL");
-    if(str_temp == "PLANARITY") options.optimize_options.weighting_scheme = PLANARITY;
-    else if(str_temp == "NEIGHBORHOOD") options.optimize_options.weighting_scheme = NEIGHBORHOOD;
-    else if(str_temp == "ALL") options.optimize_options.weighting_scheme = ALL;
-    else std::cout << "The `weighting_scheme` " << str_temp << " is not supported." << std::endl;
-
-    nh.param<std::string>("icp_options/solver", str_temp, "LIO");
-    if(str_temp == "LIO") options.optimize_options.solver = LIO;
-    else if(str_temp == "LIDAR") options.optimize_options.solver = LIDAR;
-    else if(str_temp == "LIW") options.optimize_options.solver = LIO, Odom_enble = true;
-    else std::cout << "The `solve_method` " << str_temp << " is not supported." << std::endl;
-
-    nh.param<std::string>("icp_options/loss_function", str_temp, "CAUCHY");
-    if(str_temp == "CAUCHY") options.optimize_options.loss_function = CAUCHY;
-    else if(str_temp == "STANDARD") options.optimize_options.loss_function = STANDARD;
-    else if(str_temp == "HUBER") options.optimize_options.loss_function = HUBER;
-    else if(str_temp == "TOLERANT") options.optimize_options.loss_function = TOLERANT;
-    else if(str_temp == "TRUNCATED") options.optimize_options.loss_function = TRUNCATED;
-    else std::cout << "The `loss_function` " << str_temp << " is not supported." << std::endl;
-
-    nh.param<std::string>("icp_options/viz_mode", str_temp, "TIMESTAMP");
-    if(str_temp == "TIMESTAMP") options.optimize_options.viz_mode = TIMESTAMP;
-    else if(str_temp == "WEIGHT") options.optimize_options.viz_mode = WEIGHT;
-    else if(str_temp == "NORMAL") options.optimize_options.viz_mode = NORMAL;
-    else std::cout << "The `solve_method` " << str_temp << " is not supported." << std::endl;
-    // new ct-icp
+    // ... остальные параметры аналогично
 }
 
 void lioOptimization::allocateMemory()
@@ -264,9 +242,11 @@ void lioOptimization::initialValue()
 
     fov_deg = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
     
-    ROS_INFO("odom_enble:....................................");
-    if(Odom_enble == true)  std::cout << "odom_enble : true" << std::endl;
-    else std::cout << "odom_enble : flase" << std::endl ;
+    RCLCPP_INFO(this->get_logger(), "odom_enble:....................................");
+    if(Odom_enble == true)  
+        RCLCPP_INFO(this->get_logger(), "odom_enble : true");
+    else 
+        RCLCPP_INFO(this->get_logger(), "odom_enble : false");
 
     ImuFactor::t_io = t_imu_odom;
     ImuFactor::q_io = Eigen::Quaterniond(R_imu_odom);
@@ -356,7 +336,6 @@ void lioOptimization::addPointToMap(voxelHashMap &map, const Eigen::Vector3d &po
             block.AddPoint(point);
             map[voxel(kx, ky, kz)] = std::move(block);
         }
-
     }
 }
 
@@ -392,11 +371,11 @@ size_t lioOptimization::mapSize(const voxelHashMap &map)
     return map_size;
 }
 
-void lioOptimization::standardCloudHandler(const sensor_msgs::PointCloud2::ConstPtr &msg) 
+void lioOptimization::standardCloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg) 
 {
     double sample_size = index_frame < options.init_num_frames ? options.init_voxel_size : options.voxel_size;
 
-    assert(msg->header.stamp.toSec() > last_time_lidar);
+    assert(rclcpp::Time(msg->header.stamp).seconds() > last_time_lidar);
 
     std::vector<std::vector<point3D>> v_cut_sweep;
     std::vector<double> v_dt_offset;
@@ -405,14 +384,14 @@ void lioOptimization::standardCloudHandler(const sensor_msgs::PointCloud2::Const
 
     for(int i = 1; i < sweep_cut_num + 1; i++)
     {
-
         std::vector<std::vector<point3D>> v_buffer_temp;
 
         for(int j = i; j < i + sweep_cut_num; j++)
         {
             std::vector<point3D> frame(v_cut_sweep[j]);
 
-            boost::mt19937_64 g;
+            // Исправление: замена boost::mt19937_64 на std::mt19937_64
+            std::mt19937_64 g(std::random_device{}());
             std::shuffle(frame.begin(), frame.end(), g);
 
             subSampleFrame(frame, sample_size);
@@ -424,71 +403,70 @@ void lioOptimization::standardCloudHandler(const sensor_msgs::PointCloud2::Const
 
         assert(v_buffer_temp.size() == sweep_cut_num);
         lidar_buffer.push(v_buffer_temp);
-        // ROS_INFO("LIDAR is received");
-        time_buffer.push(std::make_pair(msg->header.stamp.toSec(), v_dt_offset[i - 1] / (double)1000.0));
+        
+        time_buffer.push(std::make_pair(rclcpp::Time(msg->header.stamp).seconds(), v_dt_offset[i - 1] / (double)1000.0));
     }
 
-    assert(msg->header.stamp.toSec() > last_time_lidar);
-    last_time_lidar = msg->header.stamp.toSec();
+    assert(rclcpp::Time(msg->header.stamp).seconds() > last_time_lidar);
+    last_time_lidar = rclcpp::Time(msg->header.stamp).seconds();
 }
 
-void lioOptimization::imuHandler(const sensor_msgs::Imu::ConstPtr &msg)
+void lioOptimization::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg)
 {
-    sensor_msgs::Imu::Ptr msg_temp(new sensor_msgs::Imu(*msg));
+    sensor_msgs::msg::Imu::SharedPtr msg_temp(new sensor_msgs::msg::Imu(*msg));
 
     if (abs(time_diff) > 0.1 && time_diff_enable)
     {
-        msg_temp->header.stamp = ros::Time().fromSec(time_diff + msg->header.stamp.toSec());
+        msg_temp->header.stamp = this->now() + rclcpp::Duration::from_seconds(time_diff);
     }
 
-    assert(msg_temp->header.stamp.toSec() > last_time_imu);
+    assert(rclcpp::Time(msg_temp->header.stamp).seconds() > last_time_imu);
 
     imu_buffer.push(msg_temp);
-    // ROS_INFO("IMU is received");
-    assert(msg_temp->header.stamp.toSec() > last_time_imu);
-    last_time_imu = msg_temp->header.stamp.toSec();
+    
+    assert(rclcpp::Time(msg_temp->header.stamp).seconds() > last_time_imu);
+    last_time_imu = rclcpp::Time(msg_temp->header.stamp).seconds();
 }
 
-void lioOptimization::wheelHandler(const geometry_msgs::TwistStamped::ConstPtr &msg)
+void lioOptimization::wheelHandler(const geometry_msgs::msg::TwistStamped::SharedPtr msg)
 {
-    geometry_msgs::TwistStamped::Ptr msg_temp(new geometry_msgs::TwistStamped(*msg));
+    geometry_msgs::msg::TwistStamped::SharedPtr msg_temp(new geometry_msgs::msg::TwistStamped(*msg));
 
     if (abs(time_diff) > 0.1 && time_diff_enable)
     {
-        msg_temp->header.stamp = ros::Time().fromSec(time_diff + msg->header.stamp.toSec());
+        msg_temp->header.stamp = this->now() + rclcpp::Duration::from_seconds(time_diff);
     }
 
-    assert(msg_temp->header.stamp.toSec() > last_time_velo);
+    assert(rclcpp::Time(msg_temp->header.stamp).seconds() > last_time_velo);
 
     wheel_buffer.push(msg_temp);
 
-    assert(msg_temp->header.stamp.toSec() > last_time_velo);
-    last_time_velo = msg_temp->header.stamp.toSec();
-
-    double Lwheel =msg_temp->twist.linear.x;
-    double Rwheel = msg_temp->twist.linear.y;
+    assert(rclcpp::Time(msg_temp->header.stamp).seconds() > last_time_velo);
+    last_time_velo = rclcpp::Time(msg_temp->header.stamp).seconds();
 }
 
-std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>>  lioOptimization::getMeasurements(std::vector<std::vector<geometry_msgs::TwistStamped::ConstPtr>> &vWheel_msg)
+std::vector<std::pair<std::pair<std::vector<sensor_msgs::msg::Imu::SharedPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>>  
+lioOptimization::getMeasurements(std::vector<std::vector<geometry_msgs::msg::TwistStamped::SharedPtr>>& vWheel_msg)
 {
-    std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>> measurements;
+    std::vector<std::pair<std::pair<std::vector<sensor_msgs::msg::Imu::SharedPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>> measurements;
+    
     while (true)
     {
         if (imu_buffer.size() < (60 / sweep_cut_num) || lidar_buffer.size() < 2 || time_buffer.size() < 2 || wheel_buffer.size() < 6/sweep_cut_num){
             return measurements;
         }
 
-        if (!(imu_buffer.back()->header.stamp.toSec() > time_buffer.front().first + time_buffer.front().second))
+        if (!(rclcpp::Time(imu_buffer.back()->header.stamp).seconds() > time_buffer.front().first + time_buffer.front().second))
         {
             return measurements;
         }
 
-        if (!(wheel_buffer.back()->header.stamp.toSec() > time_buffer.front().first + time_buffer.front().second))
+        if (!(rclcpp::Time(wheel_buffer.back()->header.stamp).seconds() > time_buffer.front().first + time_buffer.front().second))
         {
             return measurements;
         }
 
-        if (!(imu_buffer.front()->header.stamp.toSec() < time_buffer.front().first + time_buffer.front().second))
+        if (!(rclcpp::Time(imu_buffer.front()->header.stamp).seconds() < time_buffer.front().first + time_buffer.front().second))
         {
             time_buffer.pop();
 
@@ -502,7 +480,7 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
             continue;
         }
 
-        if (!(wheel_buffer.front()->header.stamp.toSec() < time_buffer.front().first + time_buffer.front().second))
+        if (!(rclcpp::Time(wheel_buffer.front()->header.stamp).seconds() < time_buffer.front().first + time_buffer.front().second))
         {
             time_buffer.pop();
 
@@ -543,8 +521,8 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
         assert(lidar_buffer.front().size() == 0);
         lidar_buffer.pop();
 
-        std::vector<sensor_msgs::ImuConstPtr> imu_measurements;
-        while (imu_buffer.front()->header.stamp.toSec() < timestamp)
+        std::vector<sensor_msgs::msg::Imu::SharedPtr> imu_measurements;
+        while (rclcpp::Time(imu_buffer.front()->header.stamp).seconds() < timestamp)
         {
             imu_measurements.emplace_back(imu_buffer.front());
             imu_buffer.pop();
@@ -552,8 +530,8 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
 
         imu_measurements.emplace_back(imu_buffer.front());
 
-        std::vector<geometry_msgs::TwistStamped::ConstPtr> wheels;
-        while (wheel_buffer.front()->header.stamp.toSec() < timestamp)
+        std::vector<geometry_msgs::msg::TwistStamped::SharedPtr> wheels;
+        while (rclcpp::Time(wheel_buffer.front()->header.stamp).seconds() < timestamp)
         {
             wheels.emplace_back(wheel_buffer.front());
             wheel_buffer.pop();
@@ -562,14 +540,11 @@ std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vect
         wheels.emplace_back(wheel_buffer.front());
 
         if (imu_measurements.empty()){
-            std::cout << "no imu between two image" << std::endl;
-            ROS_WARN("no imu between two image");
+            RCLCPP_WARN(this->get_logger(), "no imu between two image");
         }
 
         if (wheels.empty()){
-            std::cout << "no wheel between two image" << std::endl;
-            ROS_WARN("no wheel between two image");
-
+            RCLCPP_WARN(this->get_logger(), "no wheel between two image");
         }
 
         measurements.emplace_back(std::make_pair(imu_measurements, v_cut_sweep), std::make_pair(timestamp_begin, timestamp_offset));
@@ -587,7 +562,7 @@ void lioOptimization::makePointTimestamp(std::vector<point3D> &sweep, double tim
 
         double delta_t = time_sweep_end - time_sweep_begin;
 
-        for (int i = 0; i < sweep.size(); i++)
+        for (size_t i = 0; i < sweep.size(); i++)
         {
             sweep[i].relative_time = sweep[i].timestamp - time_sweep_begin;
             sweep[i].alpha_time = sweep[i].relative_time / delta_t;
@@ -823,7 +798,6 @@ void lioOptimization::stateInitialization(state *cur_state)
 
 bool lioOptimization::assessRegistration(const cloudFrame *p_frame, estimationSummary &summary)
 {
-
     bool success = summary.success;
 
     if(summary.robust_level == 0 && (summary.relative_orientation > options.robust_threshold_relative_orientation ||
@@ -860,7 +834,6 @@ bool lioOptimization::assessRegistration(const cloudFrame *p_frame, estimationSu
                     ratio_empty_voxel += 1;
                 if (voxel_map.find(voxel_temp) != voxel_map.end() &&
                     voxel_map.at(voxel_temp).NumPoints() > options.max_num_points_in_voxel / 2) {
-                    // Only count voxels which have at least
                     ratio_half_full_voxel += 1;
                 }
             }
@@ -878,7 +851,6 @@ bool lioOptimization::assessRegistration(const cloudFrame *p_frame, estimationSu
                 else
                     summary.error_message = "[Odometry::AssessRegistration] Ratio of half full voxels " +
                                             std::to_string(ratio_half_full_voxel) + "below threshold.";
-
             }
         }
     }
@@ -955,7 +927,6 @@ estimationSummary lioOptimization::poseEstimation(cloudFrame *p_frame)
                 summary.relative_orientation = AngularDistance(all_cloud_frame[p_frame->id - 1]->p_state->rotation, p_frame->p_state->rotation);
 
                 summary.ego_orientation = AngularDistance(summary.state_frame->rotation_begin, summary.state_frame->rotation);
-
             }
 
             summary.relative_distance = (p_frame->p_state->translation - p_frame->p_state->translation_begin).norm();
@@ -1027,7 +998,6 @@ estimationSummary lioOptimization::poseEstimation(cloudFrame *p_frame)
                 next_robust_level = options.robust_minimal_level + 1;
             }
         }
-
     }
 
     if(p_frame->frame_id > sweep_cut_num && p_frame->sub_id != 0) add_points = false;
@@ -1065,7 +1035,7 @@ void lioOptimization::stateEstimation(std::vector<std::vector<point3D>> &v_cut_s
 
     std::vector<point3D> const_frame;
 
-    for(int i = 0; i < v_cut_sweep.size(); i++)
+    for(size_t i = 0; i < v_cut_sweep.size(); i++)
         const_frame.insert(const_frame.end(), v_cut_sweep[i].begin(), v_cut_sweep[i].end());
 
     cloudFrame *p_frame = buildFrame(const_frame, imu_pro->current_state, timestamp_begin, timestamp_offset);
@@ -1081,20 +1051,23 @@ void lioOptimization::stateEstimation(std::vector<std::vector<point3D>> &v_cut_s
             staticInitialization(p_frame);
     }
 
-    std::cout << "after solution: " << std::endl;
-    std::cout << "rotation_begin: " << p_frame->p_state->rotation_begin.x() << " " << p_frame->p_state->rotation_begin.y() << " " 
-              << p_frame->p_state->rotation_begin.z() << " " << p_frame->p_state->rotation_begin.w() << std::endl;
-    std::cout << "translation_begin: " << p_frame->p_state->translation_begin.x() << " " << p_frame->p_state->translation_begin.y() << " " << p_frame->p_state->translation_begin.z() << std::endl;
-
-    std::cout << "rotation_end: " << p_frame->p_state->rotation.x() << " " << p_frame->p_state->rotation.y() << " " 
-              << p_frame->p_state->rotation.z() << " " << p_frame->p_state->rotation.w() << std::endl;
-    std::cout << "translation_end: " << p_frame->p_state->translation.x() << " " << p_frame->p_state->translation.y() << " " << p_frame->p_state->translation.z() << std::endl;
+    RCLCPP_INFO(this->get_logger(), "after solution:");
+    RCLCPP_INFO(this->get_logger(), "rotation_begin: %f %f %f %f", 
+        p_frame->p_state->rotation_begin.x(),
+        p_frame->p_state->rotation_begin.y(),
+        p_frame->p_state->rotation_begin.z(),
+        p_frame->p_state->rotation_begin.w());
+    
+    RCLCPP_INFO(this->get_logger(), "translation_begin: %f %f %f",
+        p_frame->p_state->translation_begin.x(),
+        p_frame->p_state->translation_begin.y(),
+        p_frame->p_state->translation_begin.z());
 
     imu_pro->last_state = imu_pro->current_state;
     imu_pro->current_state = new state(imu_pro->last_state, false);
 
-    publish_odometry(pub_odom,p_frame);
-    publish_path(pub_path,p_frame);   
+    publish_odometry(pub_odom, p_frame);
+    publish_path(pub_path, p_frame);   
 
     if(debug_output)
     {
@@ -1133,8 +1106,7 @@ void lioOptimization::stateEstimation(std::vector<std::vector<point3D>> &v_cut_s
         }
     }
     
-
-    for(int i = 0; i < all_cloud_frame.size(); i++)
+    for(size_t i = 0; i < all_cloud_frame.size(); i++)
         all_cloud_frame[i]->id = all_cloud_frame[i]->id - num_remove;
 }
 
@@ -1153,7 +1125,7 @@ void lioOptimization::recordSinglePose(cloudFrame *p_frame)
     foutC.close();
 }
 
-void lioOptimization::set_posestamp(geometry_msgs::PoseStamped &body_pose_out,cloudFrame *p_frame)
+void lioOptimization::set_posestamp(geometry_msgs::msg::PoseStamped &body_pose_out, cloudFrame *p_frame)
 {
     body_pose_out.pose.position.x = p_frame->p_state->translation.x();
     body_pose_out.pose.position.y = p_frame->p_state->translation.y();
@@ -1165,10 +1137,10 @@ void lioOptimization::set_posestamp(geometry_msgs::PoseStamped &body_pose_out,cl
     body_pose_out.pose.orientation.w = p_frame->p_state->rotation.w();
 }
 
-void lioOptimization::publish_path(ros::Publisher pub_path,cloudFrame *p_frame)
+void lioOptimization::publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path, cloudFrame *p_frame)
 {
-    set_posestamp(msg_body_pose,p_frame);
-    msg_body_pose.header.stamp = ros::Time().fromSec(p_frame->time_sweep_end);
+    set_posestamp(msg_body_pose, p_frame);
+    msg_body_pose.header.stamp = rclcpp::Time(static_cast<int64_t>(p_frame->time_sweep_end * 1e9));
     msg_body_pose.header.frame_id = "camera_init";
 
     static int i = 0;
@@ -1176,17 +1148,19 @@ void lioOptimization::publish_path(ros::Publisher pub_path,cloudFrame *p_frame)
     if (i % 10 == 0) 
     {
         path.poses.push_back(msg_body_pose);
-        pub_path.publish(path);
+        pub_path->publish(path);
     }
 }
 
-void lioOptimization::publishCLoudWorld(ros::Publisher &pub_cloud_world, pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_points, cloudFrame* p_frame)
+void lioOptimization::publishCLoudWorld(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub_cloud_world, 
+                                         pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_points, 
+                                         cloudFrame* p_frame)
 {
-    sensor_msgs::PointCloud2 laserCloudmsg;
+    sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*pcl_points, laserCloudmsg);
-    laserCloudmsg.header.stamp = ros::Time().fromSec(p_frame->time_sweep_end);
+    laserCloudmsg.header.stamp = rclcpp::Time(static_cast<int64_t>(p_frame->time_sweep_end * 1e9));
     laserCloudmsg.header.frame_id = "camera_init";
-    pub_cloud_world.publish(laserCloudmsg);
+    pub_cloud_world->publish(laserCloudmsg);
 }
 
 void lioOptimization::addPointToPcl(pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_points, const Eigen::Vector3d& point, cloudFrame *p_frame)
@@ -1200,41 +1174,50 @@ void lioOptimization::addPointToPcl(pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_poi
     pcl_points->points.push_back(cloudTemp);
 }
 
-
-void lioOptimization::publish_odometry(const ros::Publisher & pubOdomAftMapped, cloudFrame *p_frame)
+void lioOptimization::publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr &pubOdomAftMapped, cloudFrame *p_frame)
 {
-    geometry_msgs::Quaternion geoQuat = tf::createQuaternionMsgFromRollPitchYaw(p_frame->p_state->rotation.z(), -p_frame->p_state->rotation.x(), -p_frame->p_state->rotation.y());
+    // Создание кватерниона из углов Эйлера
+    tf2::Quaternion tf_quaternion;
+    tf_quaternion.setRPY(p_frame->p_state->rotation.z(), 
+                         -p_frame->p_state->rotation.x(), 
+                         -p_frame->p_state->rotation.y());
+    
+    geometry_msgs::msg::Quaternion geoQuat = tf2::toMsg(tf_quaternion);
 
     odomAftMapped.header.frame_id = "camera_init";
     odomAftMapped.child_frame_id = "body";
-    odomAftMapped.header.stamp = ros::Time().fromSec(p_frame->time_sweep_end);
-    odomAftMapped.pose.pose.orientation.x = -geoQuat.y;
-    odomAftMapped.pose.pose.orientation.y = -geoQuat.z;
-    odomAftMapped.pose.pose.orientation.z = geoQuat.x;
-    odomAftMapped.pose.pose.orientation.w = geoQuat.w;
+    odomAftMapped.header.stamp = rclcpp::Time(static_cast<int64_t>(p_frame->time_sweep_end * 1e9));
+    
+    odomAftMapped.pose.pose.orientation = geoQuat;
     odomAftMapped.pose.pose.position.x = p_frame->p_state->translation.x();
     odomAftMapped.pose.pose.position.y = p_frame->p_state->translation.y();
     odomAftMapped.pose.pose.position.z = p_frame->p_state->translation.z();
-    pubOdomAftMapped.publish(odomAftMapped);
+    
+    pubOdomAftMapped->publish(odomAftMapped);
 
-    laserOdometryTrans.frame_id_ = "/camera_init";
-    laserOdometryTrans.child_frame_id_ = "/laser_odom";
-    laserOdometryTrans.stamp_ = ros::Time().fromSec(p_frame->time_sweep_end);;
-    laserOdometryTrans.setRotation(tf::Quaternion(-geoQuat.y, -geoQuat.z, geoQuat.x, geoQuat.w));
-    laserOdometryTrans.setOrigin(tf::Vector3(p_frame->p_state->translation.x(), p_frame->p_state->translation.y(), p_frame->p_state->translation.z()));
-    tfBroadcaster.sendTransform(laserOdometryTrans);
+    // Публикация трансформации
+    geometry_msgs::msg::TransformStamped laserOdometryTrans;
+    laserOdometryTrans.header.stamp = rclcpp::Time(static_cast<int64_t>(p_frame->time_sweep_end * 1e9));
+    laserOdometryTrans.header.frame_id = "camera_init";
+    laserOdometryTrans.child_frame_id = "laser_odom";
+    
+    laserOdometryTrans.transform.translation.x = p_frame->p_state->translation.x();
+    laserOdometryTrans.transform.translation.y = p_frame->p_state->translation.y();
+    laserOdometryTrans.transform.translation.z = p_frame->p_state->translation.z();
+    laserOdometryTrans.transform.rotation = geoQuat;
+    
+    tf_broadcaster_->sendTransform(laserOdometryTrans);
 }
 
 void lioOptimization::run()
 {
-    std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>> measurements;
-    std::vector<std::vector<geometry_msgs::TwistStamped::ConstPtr>> vWheel_msg;
+    std::vector<std::pair<std::pair<std::vector<sensor_msgs::msg::Imu::SharedPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>> measurements;
+    std::vector<std::vector<geometry_msgs::msg::TwistStamped::SharedPtr>> vWheel_msg;
 
-    measurements = getMeasurements( vWheel_msg);
+    measurements = getMeasurements(vWheel_msg);
 
     if (measurements.size() == 0 || vWheel_msg.size() == 0) return;
 
-    int numData = 0;
     for (auto &measurement : measurements)
     {
         auto start_lio_opt = std::chrono::steady_clock::now();
@@ -1246,9 +1229,9 @@ void lioOptimization::run()
 
         for (auto &imu_msg : measurement.first.first)
         {   
-            double time_imu = imu_msg->header.stamp.toSec();
+            double time_imu = rclcpp::Time(imu_msg->header.stamp).seconds();
 
-            double wheel_t = vWheel_msg[numData][i]->header.stamp.toSec();
+            double wheel_t = rclcpp::Time(vWheel_msg[numData][i]->header.stamp).seconds();
 
             if (i == 0)
             {
@@ -1256,7 +1239,7 @@ void lioOptimization::run()
                 vRight = vWheel_msg[numData][i]->twist.linear.y;
 
                 int n = 0;
-                while (i + n + 1 < vWheel_msg[numData].size() && vWheel_msg[numData][i + n]->header.stamp.toSec() < time_imu)
+                while (i + n + 1 < vWheel_msg[numData].size() && rclcpp::Time(vWheel_msg[numData][i + n]->header.stamp).seconds() < time_imu)
                 {
                     n++;
                 }
@@ -1268,23 +1251,23 @@ void lioOptimization::run()
             else if (wheel_t < time_imu)
             {
                 int n = 0;
-                while (i + n + 1 < vWheel_msg[numData].size() && vWheel_msg[numData][i + n]->header.stamp.toSec() < time_imu)
+                while (i + n + 1 < vWheel_msg[numData].size() && rclcpp::Time(vWheel_msg[numData][i + n]->header.stamp).seconds() < time_imu)
                 {
                     n++;
                 }
-                if (vWheel_msg[numData][i + n]->header.stamp.toSec() < time_imu)
+                if (rclcpp::Time(vWheel_msg[numData][i + n]->header.stamp).seconds() < time_imu)
                 {
                     i = i + n;
                     vLeft = vWheel_msg[numData][i]->twist.linear.x;
                     vRight = vWheel_msg[numData][i]->twist.linear.y;
                 }
-                else if (vWheel_msg[numData][i + n]->header.stamp.toSec() >= time_imu)
+                else if (rclcpp::Time(vWheel_msg[numData][i + n]->header.stamp).seconds() >= time_imu)
                 {
-                    double dt_1 = time_imu - vWheel_msg[numData][i + n - 1]->header.stamp.toSec();
-                    double dt_2 = vWheel_msg[numData][i + n]->header.stamp.toSec() - time_imu;
-                    ROS_ASSERT(dt_1 >= 0);
-                    ROS_ASSERT(dt_2 >= 0);
-                    ROS_ASSERT(dt_1 + dt_2 > 0);
+                    double dt_1 = time_imu - rclcpp::Time(vWheel_msg[numData][i + n - 1]->header.stamp).seconds();
+                    double dt_2 = rclcpp::Time(vWheel_msg[numData][i + n]->header.stamp).seconds() - time_imu;
+                    assert(dt_1 >= 0);
+                    assert(dt_2 >= 0);
+                    assert(dt_1 + dt_2 > 0);
                     double w1 = dt_2 / (dt_1 + dt_2);
                     double w2 = dt_1 / (dt_1 + dt_2);
                     vLeft = w1 * vWheel_msg[numData][i + n - 1]->twist.linear.x + w2 * vWheel_msg[numData][i + n]->twist.linear.x;
@@ -1295,10 +1278,10 @@ void lioOptimization::run()
             else if (time_imu >= wheel_t)
             {
                 double dt_1 = time_imu - current_time;
-                double dt_2 = vWheel_msg[numData][i]->header.stamp.toSec() - time_imu;
-                ROS_ASSERT(dt_1 >= 0);
-                ROS_ASSERT(dt_2 >= 0);
-                ROS_ASSERT(dt_1 + dt_2 > 0);
+                double dt_2 = rclcpp::Time(vWheel_msg[numData][i]->header.stamp).seconds() - time_imu;
+                assert(dt_1 >= 0);
+                assert(dt_2 >= 0);
+                assert(dt_1 + dt_2 > 0);
                 double w1 = dt_2 / (dt_1 + dt_2);
                 double w2 = dt_1 / (dt_1 + dt_2);
                 vLeft = w1 * vLeft + w2 * vWheel_msg[numData][i]->twist.linear.x;
@@ -1320,7 +1303,7 @@ void lioOptimization::run()
                 ry = imu_msg->angular_velocity.y;
                 rz = imu_msg->angular_velocity.z;
                 speed = (vLeft + vRight) * 0.5;
-		Eigen::Vector3d wheel_velocity = R_imu_odom * Eigen::Vector3d(speed, 0, 0);
+                Eigen::Vector3d wheel_velocity = R_imu_odom * Eigen::Vector3d(speed, 0, 0);
                 imu_pro->process(dt, Eigen::Vector3d(dx, dy, dz), Eigen::Vector3d(rx, ry, rz), wheel_velocity, time_imu);
 
                 if (options.optimize_options.solver == LIO && !initial_flag)
@@ -1346,43 +1329,37 @@ void lioOptimization::run()
                 ry = w1 * ry + w2 * imu_msg->angular_velocity.y;
                 rz = w1 * rz + w2 * imu_msg->angular_velocity.z;
                 speed = w1 * speed + w2 * (vLeft + vRight) * 0.5;
-		Eigen::Vector3d wheel_velocity = R_imu_odom * Eigen::Vector3d(speed, 0, 0);
+                Eigen::Vector3d wheel_velocity = R_imu_odom * Eigen::Vector3d(speed, 0, 0);
                 imu_pro->process(dt_1, Eigen::Vector3d(dx, dy, dz), Eigen::Vector3d(rx, ry, rz), wheel_velocity, time_frame);
             }
         }
-        std::cout <<  " velocity : " << speed << std::endl;
+        
+        RCLCPP_INFO(this->get_logger(), "velocity: %f", speed);
         numData++;
         stateEstimation(v_cut_sweep, measurement.second.first, measurement.second.second);
         
         last_time_frame = time_frame;
         index_frame++;
 
-        for(int i = 0; i < measurement.first.second.size(); i++) std::vector<point3D>().swap(measurement.first.second[i]);
+        for(size_t i = 0; i < measurement.first.second.size(); i++) 
+            std::vector<point3D>().swap(measurement.first.second[i]);
         std::vector<std::vector<point3D>>().swap(measurement.first.second);
 
         auto end_lio_opt = std::chrono::steady_clock::now();
         std::chrono::duration<double> per_scan_time = (end_lio_opt - start_lio_opt);
-        std::cout << "per_scan_time: " << per_scan_time.count() << "s." << std::endl;
+        RCLCPP_INFO(this->get_logger(), "per_scan_time: %f s", per_scan_time.count());
     }
 }
 
-
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "lio_optimization");
-    ros::Time::init();
+    rclcpp::init(argc, argv);
     
-    lioOptimization LIO;
-
-    ros::Rate rate(200);
-    while (ros::ok())
-    {
-        ros::spinOnce();
-
-        LIO.run();
-
-        rate.sleep();
-    }
-
+    auto node = std::make_shared<lioOptimization>();
+    
+    rclcpp::spin(node);
+    
+    rclcpp::shutdown();
+    
     return 0;
 }

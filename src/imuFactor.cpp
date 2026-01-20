@@ -1,4 +1,6 @@
 #include "imuFactor.h"
+#include <rclcpp/rclcpp.hpp>
+
 Eigen::Vector3d  ImuFactor::t_io;
 Eigen::Quaterniond ImuFactor::q_io;
 bool ImuFactor::odom_enble;
@@ -42,7 +44,7 @@ bool ImuFactor::Evaluate(double const *const *parameters, double *residuals, dou
 
         if (pre_integration->jacobian.maxCoeff() > 1e8 || pre_integration->jacobian.minCoeff() < -1e8)
         {
-            ROS_WARN("numerical unstable in preintegration");
+            RCLCPP_WARN(rclcpp::get_logger("imuFactor"), "numerical unstable in preintegration");
         }
 
         if (jacobians[0])
@@ -119,7 +121,7 @@ bool CTImuFactor::Evaluate(double const *const *parameters, double *residuals, d
 
         if (pre_integration->jacobian.maxCoeff() > 1e8 || pre_integration->jacobian.minCoeff() < -1e8)
         {
-            ROS_WARN("numerical unstable in preintegration");
+            RCLCPP_WARN(rclcpp::get_logger("imuFactor"), "numerical unstable in preintegration");
         }
 
         if (jacobians[0])
@@ -143,7 +145,6 @@ bool CTImuFactor::Evaluate(double const *const *parameters, double *residuals, d
             jacobian_rot_last.block<3, 3>(O_V, O_R - O_R) = numType::skewSymmetric(rot_last.inverse() * (G * sum_dt + velocity_cur - velocity_last));
             if(odom_enble == true)
                 jacobian_rot_last.block<3, 3>(O_W, O_R - O_R) = numType::skewSymmetric(rot_last.inverse() * (tran_cur - tran_last + rot_cur * t_io));
-            // jacobian_rot_last.block<3, 3>(O_W, O_R - O_R) =  Eigen::Matrix3d::Zero();
             jacobian_rot_last = sqrt_info * jacobian_rot_last * beta;
         }
         if (jacobians[2])
@@ -160,9 +161,6 @@ bool CTImuFactor::Evaluate(double const *const *parameters, double *residuals, d
             jacobian_velocity_bias_last.block<3, 3>(O_V, O_BA - O_V - 3) = - dv_dba;
             jacobian_velocity_bias_last.block<3, 3>(O_V, O_BG - O_V - 3) = - dv_dbg;
 
-            //if(odom_enble == true)
-            //    jacobian_velocity_bias_last.block<3, 3>(O_W, O_BG - O_V - 3) = - dw_dbg;
-
             jacobian_velocity_bias_last.block<3, 3>(O_BA, O_BA - O_V - 3) = - Eigen::Matrix3d::Identity();
 
             jacobian_velocity_bias_last.block<3, 3>(O_BG, O_BG - O_V - 3) = - Eigen::Matrix3d::Identity();
@@ -177,7 +175,6 @@ bool CTImuFactor::Evaluate(double const *const *parameters, double *residuals, d
             jacobian_tran_cur.block<3, 3>(O_P, O_P) = rot_last.inverse().toRotationMatrix();
             if(odom_enble == true)
                 jacobian_tran_cur.block<3, 3>(O_W, O_P) = rot_last.inverse().toRotationMatrix();
-            // jacobian_tran_cur.block<3, 3>(O_W, O_P) = Eigen::Matrix3d::Zero();
             jacobian_tran_cur = sqrt_info * jacobian_tran_cur * beta;
         }
         if (jacobians[4])
@@ -189,7 +186,6 @@ bool CTImuFactor::Evaluate(double const *const *parameters, double *residuals, d
         	jacobian_rot_cur.block<3, 3>(O_R, O_R - O_R) = numType::Qleft(corrected_delta_q.inverse() * rot_last.inverse() * rot_cur).bottomRightCorner<3, 3>();
             if(odom_enble == true)
                 jacobian_rot_cur.block<3, 3>(O_W, O_R - O_R) = -rot_last.inverse().toRotationMatrix() * numType::skewSymmetric(rot_cur.toRotationMatrix() * t_io);
-            // jacobian_rot_cur.block<3, 3>(O_W, O_R - O_R) = Eigen::Matrix3d::Zero();
         	jacobian_rot_cur = sqrt_info * jacobian_rot_cur * beta;
         }
         if (jacobians[5])
@@ -208,7 +204,6 @@ bool CTImuFactor::Evaluate(double const *const *parameters, double *residuals, d
 
 bool BeginWheelConsistencyFactor::Evaluate(double const* const* parameters, double* residuals, double** jacobians) const
 {
-    // Eigen::Quaterniond rot_cur(parameters[0][3], parameters[0][0], parameters[0][1], parameters[0][2]);
     Eigen::Vector3d velocity_begin(parameters[0][0], parameters[0][1], parameters[0][2]);
 
     Eigen::Vector3d temp = beta * (rot_last*wheel_begin_velocity - velocity_begin);

@@ -1,4 +1,6 @@
 #include "imuProcessing.h"
+#include <rclcpp/rclcpp.hpp>
+
 Eigen::Vector3d imuIntegration::t_io;
 Eigen::Quaterniond imuIntegration::q_io;
 bool imuIntegration::odom_enble;
@@ -252,17 +254,6 @@ void imuIntegration::midPointIntegration(double dt_,
             F_x.block<3, 3>(9, 9) = Eigen::Matrix3d::Identity();
             F_x.block<3, 3>(9, 12) = 0.5 * result_delta_q.toRotationMatrix() * R_vel1_x * dt_ * dt_;
         }
-        // else
-        // {
-        //     F_x.block<3, 3>(9, 3) = Eigen::Matrix3d::Identity();
-        //     F_x.block<3, 3>(9, 9) = Eigen::Matrix3d::Identity();
-        //     F_x.block<3, 3>(9, 12) = Eigen::Matrix3d::Identity();
-        // }
-
-        // F_x.block<3, 3>(9, 3) = -0.5 * delta_q.toRotationMatrix() * R_vel0_x * dt_ +
-        //                         -0.5 * result_delta_q.toRotationMatrix() * R_vel1_x * (Eigen::Matrix3d::Identity() - R_omega_x * dt_) * dt_;
-        // F_x.block<3, 3>(9, 9) = Eigen::Matrix3d::Identity();
-        // F_x.block<3, 3>(9, 12) = 0.5 * result_delta_q.toRotationMatrix() * R_vel1_x * dt_ * dt_;
 
         F_x.block<3, 3>(12, 12) = Eigen::MatrixXd::Identity(3, 3);
 
@@ -289,18 +280,6 @@ void imuIntegration::midPointIntegration(double dt_,
             F_w.block<3, 3>(9, 12) = 0.5 * delta_q.toRotationMatrix() * dt_;
             F_w.block<3, 3>(9, 15) = 0.5 * result_delta_q.toRotationMatrix() * dt_;
         }
-        // else
-        // {
-        //     F_w.block<3, 3>(9, 3) = Eigen::Matrix3d::Identity();
-        //     F_w.block<3, 3>(9, 9) = Eigen::Matrix3d::Identity();
-        //     F_w.block<3, 3>(9, 12) = Eigen::Matrix3d::Identity();
-        //     F_w.block<3, 3>(9, 15) = Eigen::Matrix3d::Identity();
-        // }
-
-        // F_w.block<3, 3>(9, 3) = -0.25 * result_delta_q.toRotationMatrix() * R_vel1_x * dt_ * dt_;
-        // F_w.block<3, 3>(9, 9) = -0.25 * result_delta_q.toRotationMatrix() * R_vel1_x * dt_ * dt_;
-        // F_w.block<3, 3>(9, 12) = 0.5 * delta_q.toRotationMatrix() * dt_;
-        // F_w.block<3, 3>(9, 15) = 0.5 * result_delta_q.toRotationMatrix() * dt_;
 
         F_w.block<3, 3>(12, 18) = Eigen::MatrixXd::Identity(3, 3) * dt_;
         F_w.block<3, 3>(15, 21) = Eigen::MatrixXd::Identity(3, 3) * dt_;
@@ -383,7 +362,6 @@ Eigen::Matrix<double, 18, 1> imuIntegration::evaluate(const Eigen::Vector3d &p_l
         residuals.block<3, 1>(O_W, 0) = q_last.inverse() * (p_cur - p_last) - t_io + q_last.inverse() * q_cur * t_io - corrected_delta_p_wheel;
     else
         residuals.block<3, 1>(O_W, 0)= Eigen::Vector3d::Zero();
-    // residuals.block<3, 1>(O_W, 0) = q_last.inverse() * (p_cur - p_last) - t_io + q_last.inverse() * q_cur * t_io - corrected_delta_p_wheel;
 
     residuals.block<3, 1>(O_BA, 0) = ba_cur - ba_last;
     residuals.block<3, 1>(O_BG, 0) = bg_cur - bg_last;

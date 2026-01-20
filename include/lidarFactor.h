@@ -224,7 +224,6 @@ private:
     double beta_ = 1.0;
 };
 
-// A Functor which enforces frame orientation consistency between two poses
 struct OrientationConsistencyFunctor {
 
     static constexpr int NumResiduals() { return 1; }
@@ -247,10 +246,8 @@ struct OrientationConsistencyFunctor {
 private:
     Eigen::Quaterniond previous_orientation_;
     double beta_;
-
 };
 
-// A Const Functor which enforces a Constant Velocity constraint on translation
 struct ConstantVelocityFunctor {
 
     static constexpr int NumResiduals() { return 3; }
@@ -273,7 +270,6 @@ private:
     double beta_ = 1.0;
 };
 
-// A Const Functor which enforces a Small Velocity constraint
 struct SmallVelocityFunctor {
 
     static constexpr int NumResiduals() { return 3; }

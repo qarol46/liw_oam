@@ -1,5 +1,11 @@
 #include "cloudProcessing.h"
 #include "utility.h"
+#include <rclcpp/rclcpp.hpp>
+
+bool time_list_velodyne(velodyne_ros::Point &point_1, velodyne_ros::Point &point_2)
+{
+    return (point_1.time < point_2.time);
+}
 
 cloudProcessing::cloudProcessing()
 {
@@ -93,12 +99,14 @@ void cloudProcessing::setSweepCutNum(int para)
 	}
 }
 
-void cloudProcessing::process(const sensor_msgs::PointCloud2::ConstPtr &msg, std::vector<std::vector<point3D>> &v_cloud_out, std::vector<double> &v_dt_offset)
+void cloudProcessing::process(const sensor_msgs::msg::PointCloud2::SharedPtr msg, 
+                             std::vector<std::vector<point3D>> &v_cloud_out, 
+                             std::vector<double> &v_dt_offset)
 {
 	switch (lidar_type)
 	{
 	case OUST64:
-		ROS_ERROR("Only Velodyne LiDAR interface is supported currently.");
+		RCLCPP_ERROR(rclcpp::get_logger("cloudProcessing"), "Only Velodyne LiDAR interface is supported currently.");
 		break;
 
 	case VELO16:
@@ -106,7 +114,7 @@ void cloudProcessing::process(const sensor_msgs::PointCloud2::ConstPtr &msg, std
 		break;
 
 	default:
-		ROS_ERROR("Only Velodyne LiDAR interface is supported currently.");
+		RCLCPP_ERROR(rclcpp::get_logger("cloudProcessing"), "Only Velodyne LiDAR interface is supported currently.");
 		break;
 	}
 
@@ -115,9 +123,11 @@ void cloudProcessing::process(const sensor_msgs::PointCloud2::ConstPtr &msg, std
     	std::ofstream foutC(std::string(output_path + "/cutCloud.txt"), std::ios::app);
 
 	    foutC.setf(std::ios::scientific, std::ios::floatfield);
-	        foutC.precision(6);
+	    foutC.precision(6);
 
-	    foutC << std::fixed << msg->header.stamp.toSec() << " ";
+	    // ROS2: использование rclcpp::Time
+	    double timestamp = rclcpp::Time(msg->header.stamp).seconds();
+	    foutC << std::fixed << timestamp << " ";
 
     	int num = 0;
 
@@ -145,12 +155,15 @@ void cloudProcessing::process(const sensor_msgs::PointCloud2::ConstPtr &msg, std
     sweep_id++;
 }
 
-void cloudProcessing::oust64Handler(const sensor_msgs::PointCloud2::ConstPtr &msg, std::vector<std::vector<point3D>> &v_cloud_out)
+void cloudProcessing::oust64Handler(const sensor_msgs::msg::PointCloud2::SharedPtr msg, 
+                                   std::vector<std::vector<point3D>> &v_cloud_out)
 {
-
+	// TODO: Implement Ouster 64 handler for ROS2
 }
 
-void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg, std::vector<std::vector<point3D>> &v_cloud_out, std::vector<double> &v_dt_offset)
+void cloudProcessing::velodyneHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg, 
+                                      std::vector<std::vector<point3D>> &v_cloud_out, 
+                                      std::vector<double> &v_dt_offset)
 {
 	resetVector();
 
@@ -179,7 +192,7 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
 
     if(given_offset_time)
     {
-    	sort(raw_cloud.points.begin(), raw_cloud.points.end(), time_list_velodyne);
+    	std::sort(raw_cloud.points.begin(), raw_cloud.points.end(), time_list_velodyne);
 		while ((raw_cloud.points[size - 1].time >= 0.1)&&(time_unit == SEC))  //KAIST lidar's relative timestamp >0.1s 
 		{
 			size--;
@@ -193,11 +206,11 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
 
     std::vector<bool> is_first;
     is_first.resize(N_SCANS);
-    fill(is_first.begin(), is_first.end(), true);
+    std::fill(is_first.begin(), is_first.end(), true);
 
     std::vector<double> yaw_first_point;
     yaw_first_point.resize(N_SCANS);
-    fill(yaw_first_point.begin(), yaw_first_point.end(), 0.0);
+    std::fill(yaw_first_point.begin(), yaw_first_point.end(), 0.0);
 
     std::vector<point3D> v_point_full;
 
@@ -234,7 +247,9 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
 				point_temp.relative_time = (yaw_first_point[layer] - yaw_angle + 360.0) / omega;
 			}
 
-			point_temp.timestamp = point_temp.relative_time / double(1000) + msg->header.stamp.toSec();
+			// ROS2: использование rclcpp::Time
+			double timestamp = rclcpp::Time(msg->header.stamp).seconds();
+			point_temp.timestamp = point_temp.relative_time / double(1000) + timestamp;
 			v_point_full.push_back(point_temp);
 		}
 
@@ -243,7 +258,9 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
 			if(point_temp.raw_point.x() * point_temp.raw_point.x() + point_temp.raw_point.y() * point_temp.raw_point.y()
 				 + point_temp.raw_point.z() * point_temp.raw_point.z() > (blind * blind))
 			{
-				point_temp.timestamp = point_temp.relative_time / double(1000) + msg->header.stamp.toSec();
+				// ROS2: использование rclcpp::Time
+				double timestamp = rclcpp::Time(msg->header.stamp).seconds();
+				point_temp.timestamp = point_temp.relative_time / double(1000) + timestamp;
         		point_temp.alpha_time = point_temp.relative_time / dt_last_point;
 
 				int id = int(point_temp.relative_time / delta_cut_time) + sweep_cut_num;
@@ -259,7 +276,7 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
 	{
 		assert(v_point_full.size() == size);
 
-		sort(v_point_full.begin(), v_point_full.end(), time_list);
+		std::sort(v_point_full.begin(), v_point_full.end(), time_list);
 		dt_last_point = v_point_full.back().relative_time;
 		delta_cut_time = dt_last_point / sweep_cut_num;
 

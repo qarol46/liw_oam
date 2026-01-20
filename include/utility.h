@@ -2,10 +2,12 @@
 // c++
 #include <iostream>
 #include <string>
-#include <tr1/unordered_map>
+#include <unordered_map>
+#include <memory>
 
-// ros
-#include <sensor_msgs/PointCloud2.h>
+// ROS2
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 // eigen 
 #include <Eigen/Core>
@@ -13,14 +15,11 @@
 // pcl
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl_ros/point_cloud.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 // cloud processing
 #include "cloudProcessing.h"
-
 #include "cloudMap.h"
-
 
 extern bool debug_output;
 extern std::string output_path;
@@ -204,9 +203,10 @@ void distortFrame(std::vector<point3D> &points, Eigen::Quaterniond &q_begin, Eig
 
 void transformPoint(MotionCompensation compensation, point3D &point_temp, Eigen::Quaterniond &q_begin, Eigen::Quaterniond &q_end, Eigen::Vector3d &t_begin, Eigen::Vector3d &t_end, Eigen::Matrix3d &R_imu_lidar, Eigen::Vector3d &t_imu_lidar);
 
+// В ROS2 это уже есть в стандартной библиотеке, но оставим для совместимости
 namespace std {
     template <typename T, typename... Args>
-        std::unique_ptr<T> make_unique(Args&&... args) {
+    std::unique_ptr<T> make_unique(Args&&... args) {
         return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
     }
 }

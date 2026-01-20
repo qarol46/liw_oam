@@ -1,21 +1,27 @@
 #pragma once
 // c++
 #include <iostream>
-#include <math.h>
+#include <cmath>
 #include <thread>
 #include <fstream>
 #include <vector>
 #include <queue>
+#include <memory>
 
-// ros
-#include <ros/ros.h>
-#include <nav_msgs/Odometry.h>
-#include <nav_msgs/Path.h>
-#include <tf/transform_datatypes.h>
-#include <tf/transform_broadcaster.h>
-#include <geometry_msgs/Vector3.h>
-#include <sensor_msgs/Imu.h>
-#include <sensor_msgs/PointCloud2.h>
+// ROS2
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+
+// Boost для random
+#include <boost/random.hpp>
 
 // eigen 
 #include <Eigen/Core>
@@ -23,8 +29,6 @@
 // pcl
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl_ros/point_cloud.h>
-#include <pcl_conversions/pcl_conversions.h>
 #include <pcl/range_image/range_image.h>
 #include <pcl/filters/filter.h>	
 #include <pcl/filters/voxel_grid.h>
@@ -32,20 +36,13 @@
 #include <pcl/common/common.h>
 #include <pcl/registration/icp.h>
 #include <pcl/io/pcd_io.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 #include "cloudMap.h"
-
-// cloud processing
 #include "cloudProcessing.h"
-
-// IMU processing
 #include "imuProcessing.h"
-
-// utility
 #include "utility.h"
 #include "parameters.h"
-
-// optimize factor
 #include "imuFactor.h"
 #include "lidarFactor.h"
 #include "poseParameterization.h"
@@ -151,32 +148,33 @@ struct optimizeSummary {
     std::string error_log;
 };
 
-class lioOptimization{
-
+class lioOptimization : public rclcpp::Node
+{
 private:
+    // ROS2 Publishers
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_body;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_world;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path;
 
-	ros::NodeHandle nh;
+    // ROS2 Subscribers
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_ori;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_ori;
+    rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_wheel_ori;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_gps_ori;
 
-	ros::Publisher pub_cloud_body;     // the registered cloud of cuurent sweep to be published for visualization
-    ros::Publisher pub_cloud_world;   // the cloud of global map to be published for visualization
-    ros::Publisher pub_odom;		// the pose of current sweep after LIO-optimization
-    ros::Publisher pub_path;				// the position of current sweep after LIO-optimization for visualization
-
-    ros::Subscriber sub_cloud_ori;   // the data of original point clouds from LiDAR sensor
-    ros::Subscriber sub_imu_ori;			// the data of original accelerometer and gyroscope from IMU sensor
-    ros::Subscriber sub_wheel_ori;
-
-    ros::Subscriber sub_gps_ori;
+    // TF2 Broadcaster
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     std::string lidar_topic;
     std::string imu_topic;
     std::string wheel_topic;
 
-	cloudProcessing *cloud_pro;
+    cloudProcessing *cloud_pro;
     imuProcessing *imu_pro;
 
     bool extrin_enable;
-    bool Odom_enble = false;
+    bool Odom_enble = true;
 
     double laser_point_cov;
 
@@ -196,9 +194,9 @@ private:
     std::queue<std::pair<double, double>> time_buffer;
     std::queue<std::vector<pcl::PointCloud<pcl::PointXYZINormal>::Ptr>> feature_buffer;
     std::queue<std::vector<std::vector<point3D>>> lidar_buffer;
-    std::queue<sensor_msgs::Imu::ConstPtr> imu_buffer;
-    std::queue<geometry_msgs::TwistStamped::ConstPtr> wheel_buffer;
-    std::vector<std::vector<geometry_msgs::TwistStamped::ConstPtr>> vWheel_msg;
+    std::queue<sensor_msgs::msg::Imu::SharedPtr> imu_buffer;
+    std::queue<geometry_msgs::msg::TwistStamped::SharedPtr> wheel_buffer;
+    std::vector<std::vector<geometry_msgs::msg::TwistStamped::SharedPtr>> vWheel_msg;
 
     std::vector<cloudFrame*> all_cloud_frame;
 
@@ -207,8 +205,8 @@ private:
 
     std::vector<std::vector<pcl::PointXYZINormal, Eigen::aligned_allocator<pcl::PointXYZINormal>>>  nearest_points;
 
-	double last_time_lidar;
-	double last_time_imu;
+    double last_time_lidar;
+    double last_time_imu;
     double last_time_velo;
     double last_time_frame;
     double current_time;
@@ -239,14 +237,13 @@ private:
     std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> v_acc_static;
     std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> v_gyr_static;
 
-    geometry_msgs::Quaternion geoQuat;
-    geometry_msgs::PoseStamped msg_body_pose;
-    nav_msgs::Path path;
-    nav_msgs::Odometry odomAftMapped;
+    geometry_msgs::msg::Quaternion geoQuat;
+    geometry_msgs::msg::PoseStamped msg_body_pose;
+    nav_msgs::msg::Path path;
+    nav_msgs::msg::Odometry odomAftMapped;
 
 public:
-
-	lioOptimization();
+    explicit lioOptimization(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
     void readParameters();
 
@@ -254,18 +251,19 @@ public:
 
     void initialValue();
 
-    void standardCloudHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
+    void standardCloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
-	void imuHandler(const sensor_msgs::Imu::ConstPtr &msg);
+    void imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg);
 
-    void wheelHandler(const geometry_msgs::TwistStamped::ConstPtr& msg);
+    void wheelHandler(const geometry_msgs::msg::TwistStamped::SharedPtr msg);
 
-    std::vector<std::pair<std::pair<std::vector<sensor_msgs::ImuConstPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>> getMeasurements(std::vector<std::vector<geometry_msgs::TwistStamped::ConstPtr>>& vWheel_msg);
+    std::vector<std::pair<std::pair<std::vector<sensor_msgs::msg::Imu::SharedPtr>, std::vector<std::vector<point3D>>>, std::pair<double, double>>> 
+    getMeasurements(std::vector<std::vector<geometry_msgs::msg::TwistStamped::SharedPtr>>& vWheel_msg);
 
     // main loop
     void stateEstimation(std::vector<std::vector<point3D>> &v_cut_sweep, double timestamp_begin, double timestamp_offset);
 
-	void run();
+    void run();
     // main loop
 
     // data pre-processing
@@ -324,24 +322,25 @@ public:
     void removePointsFarFromLocation(voxelHashMap &map, const Eigen::Vector3d &location, double distance);
 
     size_t mapSize(const voxelHashMap &map);
-    // mao update
+    // map update
 
     // save state for evaluation
     void recordSinglePose(cloudFrame *p_frame);
     // save state for evaluation
 
     // visualization
-    void publish_path(ros::Publisher pub_path,cloudFrame *p_frame);
+    void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path, cloudFrame *p_frame);
 
-    void set_posestamp(geometry_msgs::PoseStamped &body_pose_out,cloudFrame *p_frame);
+    void set_posestamp(geometry_msgs::msg::PoseStamped &body_pose_out, cloudFrame *p_frame);
 
     void addPointToPcl(pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_points, const Eigen::Vector3d& point, cloudFrame *p_frame);
-    void publishCLoudWorld(ros::Publisher & pub_cloud_world, pcl::PointCloud<pcl::PointXYZI>::Ptr laserCloudFullRes, cloudFrame* p_frame);
+    
+    void publishCLoudWorld(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & pub_cloud_world, 
+                          pcl::PointCloud<pcl::PointXYZI>::Ptr laserCloudFullRes, cloudFrame* p_frame);
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr points_world;
-    void publish_odometry(const ros::Publisher & pubOdomAftMapped, cloudFrame *p_frame);
+    
+    void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr & pubOdomAftMapped, cloudFrame *p_frame);
 
-    tf::TransformBroadcaster tfBroadcaster;
-    tf::StampedTransform laserOdometryTrans;
     // visualization
 };

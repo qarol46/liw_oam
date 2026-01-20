@@ -1,6 +1,6 @@
 // c++
 #include <iostream>
-#include <math.h>
+#include <cmath>
 #include <vector>
 
 // eigen 
@@ -108,11 +108,12 @@ optimizeSummary lioOptimization::optimizeByAnalyticLidar(const icpOptions &cur_i
         transformKeypoints();
 
         ceres::Problem problem;
-        ceres::LossFunction *loss_function;
+        ceres::LossFunction *loss_function = nullptr;
 
         switch (cur_icp_options.loss_function)
         {
             case LeastSquares::STANDARD:
+                loss_function = nullptr;
                 break;
             case LeastSquares::CAUCHY:
                 loss_function = new ceres::CauchyLoss(cur_icp_options.ls_sigma);
@@ -170,13 +171,12 @@ optimizeSummary lioOptimization::optimizeByAnalyticLidar(const icpOptions &cur_i
 
             Eigen::Vector3d location = R_imu_lidar * raw_point + t_imu_lidar;
 
-            auto neighborhood = estimatePointNeighborhood(vector_neighbors, location/*raw_point*/, weight);
+            auto neighborhood = estimatePointNeighborhood(vector_neighbors, location, weight);
 
             weight = lambda_weight * weight + lambda_neighborhood * std::exp(-(vector_neighbors[0] -
                      keypoint.point).norm() / (kMaxPointToPlane * kMinNumNeighbors));
 
             double point_to_plane_dist;
-            std::set<voxel> neighbor_voxels;
             for (int i(0); i < cur_icp_options.num_closest_neighbors; ++i) {
                 point_to_plane_dist = std::abs((keypoint.point - vector_neighbors[i]).transpose() * neighborhood.normal);
 
@@ -199,20 +199,20 @@ optimizeSummary lioOptimization::optimizeByAnalyticLidar(const icpOptions &cur_i
                                 if (keypoints[k].timestamp < p_frame->time_sweep_end && keypoints[k].timestamp > v_inter_time[0])
                                 {
                                     double alpha = (keypoints[k].timestamp - v_inter_time[0]) / (p_frame->time_sweep_end - v_inter_time[0]);
-                                    CTLidarPlaneNormFactor *cost_function = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
-                                    problem.AddResidualBlock(cost_function, loss_function, &v_inter_trans[0].x(), &v_inter_quat[0].x(), &end_t.x(), &end_quat.x());
+                                    CTLidarPlaneNormFactor *cost_function_inter = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
+                                    problem.AddResidualBlock(cost_function_inter, loss_function, &v_inter_trans[0].x(), &v_inter_quat[0].x(), &end_t.x(), &end_quat.x());
                                 }
                                 else if (keypoints[k].timestamp < v_inter_time[0] && keypoints[k].timestamp > v_inter_time[1])
                                 {
                                     double alpha = (keypoints[k].timestamp - v_inter_time[1]) / (v_inter_time[0] - v_inter_time[1]);
-                                    CTLidarPlaneNormFactor *cost_function = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
-                                    problem.AddResidualBlock(cost_function, loss_function, &v_inter_trans[1].x(), &v_inter_quat[1].x(), &v_inter_trans[0].x(), &v_inter_quat[0].x());
+                                    CTLidarPlaneNormFactor *cost_function_inter = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
+                                    problem.AddResidualBlock(cost_function_inter, loss_function, &v_inter_trans[1].x(), &v_inter_quat[1].x(), &v_inter_trans[0].x(), &v_inter_quat[0].x());
                                 }
                                 else if (keypoints[k].timestamp < v_inter_time[1] && keypoints[k].timestamp > p_frame->time_sweep_begin)
                                 {
                                     double alpha = (keypoints[k].timestamp - p_frame->time_sweep_begin) / (v_inter_time[1] - p_frame->time_sweep_begin);
-                                    CTLidarPlaneNormFactor *cost_function = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
-                                    problem.AddResidualBlock(cost_function, loss_function, &begin_t.x(), &begin_quat.x(), &v_inter_trans[1].x(), &v_inter_quat[1].x());
+                                    CTLidarPlaneNormFactor *cost_function_inter = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
+                                    problem.AddResidualBlock(cost_function_inter, loss_function, &begin_t.x(), &begin_quat.x(), &v_inter_trans[1].x(), &v_inter_quat[1].x());
                                 }
                             }  
                             break;
@@ -244,7 +244,8 @@ optimizeSummary lioOptimization::optimizeByAnalyticLidar(const icpOptions &cur_i
                 problem.AddResidualBlock(cost_small_velocity, nullptr, &begin_t.x(), &end_t.x());
             }
         }
-        if (num_residuals < cur_icp_options.min_number_neighbors)
+        
+        if (num_residuals < cur_icp_options.min_num_residuals)
         {
             std::stringstream ss_out;
             ss_out << "[Optimization] Error : not enough keypoints selected in ct-icp !" << std::endl;
@@ -272,17 +273,17 @@ optimizeSummary lioOptimization::optimizeByAnalyticLidar(const icpOptions &cur_i
             std::cout << summary_ceres.FullReport() << std::endl;
             throw std::runtime_error("Error During Optimization");
         }
+        
         if (cur_icp_options.debug_print) {
             std::cout << summary_ceres.BriefReport() << std::endl;
         }
-
 
         begin_quat.normalize();
         end_quat.normalize();
 
         double diff_trans = 0, diff_rot = 0;
 
-        for (int i = 1; i < sweep_cut_num - 1; i++)
+        for (size_t i = 1; i < v_inter_quat.size(); i++)
         {
             v_inter_quat[i].normalize();
 
@@ -320,7 +321,6 @@ optimizeSummary lioOptimization::optimizeByAnalyticLidar(const icpOptions &cur_i
 
             if (cur_icp_options.debug_print) {
                 std::cout << "Optimization: Finished with N=" << iter << " ICP iterations" << std::endl;
-
             }
             break;
         }
@@ -443,11 +443,12 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
         transformKeypoints();
 
         ceres::Problem problem;
-        ceres::LossFunction *loss_function;
+        ceres::LossFunction *loss_function = nullptr;
 
         switch (cur_icp_options.loss_function)
         {
             case LeastSquares::STANDARD:
+                loss_function = nullptr;
                 break;
             case LeastSquares::CAUCHY:
                 loss_function = new ceres::CauchyLoss(cur_icp_options.ls_sigma);
@@ -474,7 +475,7 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
                 problem.AddParameterBlock(&begin_velocity_bias[0], 9);
                 problem.AddParameterBlock(&end_velocity_bias[0], 9);
 
-                for (int i = 0; i < sweep_cut_num - 1; i++)
+                for (size_t i = 0; i < v_inter_quat.size(); i++)
                 {
                     problem.AddParameterBlock(&v_inter_quat[i].x(), 4, parameterization);
                     problem.AddParameterBlock(&v_inter_trans[i].x(), 3);
@@ -491,7 +492,6 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
 
         int num_residuals = 0;
         int num_keypoints = keypoints.size();
-        int num_threads = cur_icp_options.ls_num_threads;
 
         for (int k = 0; k < num_keypoints; ++k) {
             auto &keypoint = keypoints[k];
@@ -516,7 +516,6 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
                      keypoint.point).norm() / (kMaxPointToPlane * kMinNumNeighbors));
 
             double point_to_plane_dist;
-            std::set<voxel> neighbor_voxels;
             for (int i(0); i < cur_icp_options.num_closest_neighbors; ++i) {
                 point_to_plane_dist = std::abs((keypoint.point - vector_neighbors[i]).transpose() * neighborhood.normal);
 
@@ -539,20 +538,20 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
                                 if (keypoints[k].timestamp < p_frame->time_sweep_end && keypoints[k].timestamp > v_inter_time[0])
                                 {
                                     double alpha = (keypoints[k].timestamp - v_inter_time[0]) / (p_frame->time_sweep_end - v_inter_time[0]);
-                                    CTLidarPlaneNormFactor *cost_function = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
-                                    problem.AddResidualBlock(cost_function, loss_function, &v_inter_trans[0].x(), &v_inter_quat[0].x(), &end_t.x(), &end_quat.x());
+                                    CTLidarPlaneNormFactor *cost_function_inter = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
+                                    problem.AddResidualBlock(cost_function_inter, loss_function, &v_inter_trans[0].x(), &v_inter_quat[0].x(), &end_t.x(), &end_quat.x());
                                 }
                                 else if (keypoints[k].timestamp < v_inter_time[0] && keypoints[k].timestamp > v_inter_time[1])
                                 {
                                     double alpha = (keypoints[k].timestamp - v_inter_time[1]) / (v_inter_time[0] - v_inter_time[1]);
-                                    CTLidarPlaneNormFactor *cost_function = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
-                                    problem.AddResidualBlock(cost_function, loss_function, &v_inter_trans[1].x(), &v_inter_quat[1].x(), &v_inter_trans[0].x(), &v_inter_quat[0].x());
+                                    CTLidarPlaneNormFactor *cost_function_inter = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
+                                    problem.AddResidualBlock(cost_function_inter, loss_function, &v_inter_trans[1].x(), &v_inter_quat[1].x(), &v_inter_trans[0].x(), &v_inter_quat[0].x());
                                 }
                                 else if (keypoints[k].timestamp < v_inter_time[1] && keypoints[k].timestamp > p_frame->time_sweep_begin)
                                 {
                                     double alpha = (keypoints[k].timestamp - p_frame->time_sweep_begin) / (v_inter_time[1] - p_frame->time_sweep_begin);
-                                    CTLidarPlaneNormFactor *cost_function = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
-                                    problem.AddResidualBlock(cost_function, loss_function, &begin_t.x(), &begin_quat.x(), &v_inter_trans[1].x(), &v_inter_quat[1].x());
+                                    CTLidarPlaneNormFactor *cost_function_inter = new CTLidarPlaneNormFactor(keypoints[k].raw_point, norm_vector, norm_offset, alpha, weight);
+                                    problem.AddResidualBlock(cost_function_inter, loss_function, &begin_t.x(), &begin_quat.x(), &v_inter_trans[1].x(), &v_inter_quat[1].x());
                                 }
                             }
                             break;
@@ -593,7 +592,7 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
                             problem.AddResidualBlock(imu_factor_begin, loss_function, &begin_t.x(), &begin_quat.x(), &begin_velocity_bias[0], 
                                                      &v_inter_trans.back().x(), &v_inter_quat.back().x(), &v_inter_velocity_bias.back()[0]);
 
-                            for (int i = 1; i < sweep_cut_num - 1; i++)
+                            for (size_t i = 1; i < v_inter_quat.size(); i++)
                             {
                                 CTImuFactor* imu_factor = new CTImuFactor(all_cloud_frame[p_frame->id - i]->p_state->pre_integration, 1);
                                 problem.AddResidualBlock(imu_factor, loss_function, &v_inter_trans[i].x(), &v_inter_quat[i].x(), &v_inter_velocity_bias[i][0], 
@@ -612,11 +611,11 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
                         
                         if(Odom_enble == true)
                         {
-                        BeginWheelConsistencyFactor *cost_wheel_begin_consistency = new BeginWheelConsistencyFactor(begin_quat,velocity_wheel_, sqrt(num_residuals * cur_icp_options.beta_wheel_velocity * laser_point_cov));
-                        problem.AddResidualBlock(cost_wheel_begin_consistency, nullptr, &begin_velocity_bias[0]);
+                            BeginWheelConsistencyFactor *cost_wheel_begin_consistency = new BeginWheelConsistencyFactor(begin_quat,velocity_wheel_, sqrt(num_residuals * cur_icp_options.beta_wheel_velocity * laser_point_cov));
+                            problem.AddResidualBlock(cost_wheel_begin_consistency, nullptr, &begin_velocity_bias[0]);
 
-                        WheelConsistencyFactor *cost_wheel_consistency = new WheelConsistencyFactor(velocity_wheel_, sqrt(num_residuals * cur_icp_options.beta_wheel_velocity * laser_point_cov));
-                        problem.AddResidualBlock(cost_wheel_consistency, nullptr,&end_quat.x(), &end_velocity_bias[0]);
+                            WheelConsistencyFactor *cost_wheel_consistency = new WheelConsistencyFactor(velocity_wheel_, sqrt(num_residuals * cur_icp_options.beta_wheel_velocity * laser_point_cov));
+                            problem.AddResidualBlock(cost_wheel_consistency, nullptr,&end_quat.x(), &end_velocity_bias[0]);
                         }
                         
                         VelocityConsistencyFactor *cost_velocity_consistency = new VelocityConsistencyFactor(all_cloud_frame[p_frame->id - sweep_cut_num]->p_state, sqrt(num_residuals * cur_icp_options.beta_constant_velocity * laser_point_cov));
@@ -632,7 +631,8 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
                 }
             }
         }
-        if (num_residuals < cur_icp_options.min_number_neighbors)
+        
+        if (num_residuals < cur_icp_options.min_num_residuals)
         {
             std::stringstream ss_out;
             ss_out << "[Optimization] Error : not enough keypoints selected in ct-icp !" << std::endl;
@@ -660,17 +660,17 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
             std::cout << summary_ceres.FullReport() << std::endl;
             throw std::runtime_error("Error During Optimization");
         }
+        
         if (cur_icp_options.debug_print) {
             std::cout << summary_ceres.BriefReport() << std::endl;
         }
-
 
         begin_quat.normalize();
         end_quat.normalize();
 
         double diff_trans = 0, diff_rot = 0, diff_velocity = 0;
 
-        for (int i = 1; i < sweep_cut_num - 1; i++)
+        for (size_t i = 1; i < v_inter_quat.size(); i++)
         {
             v_inter_quat[i].normalize();
 
@@ -726,7 +726,6 @@ optimizeSummary lioOptimization::optimizeByAnalyticLio(const icpOptions &cur_icp
 
             if (cur_icp_options.debug_print) {
                 std::cout << "Optimization: Finished with N=" << iter << " ICP iterations" << std::endl;
-
             }
             break;
         }
@@ -748,7 +747,7 @@ Neighborhood lioOptimization::computeNeighborhoodDistribution(const std::vector<
         barycenter += point;
     }
 
-    barycenter /= (double) points.size();
+    barycenter /= static_cast<double>(points.size());
     neighborhood.center = barycenter;
 
     Eigen::Matrix3d covariance_Matrix(Eigen::Matrix3d::Zero());
@@ -758,9 +757,11 @@ Neighborhood lioOptimization::computeNeighborhoodDistribution(const std::vector<
                 covariance_Matrix(k, l) += (point(k) - barycenter(k)) *
                                            (point(l) - barycenter(l));
     }
+    
     covariance_Matrix(1, 0) = covariance_Matrix(0, 1);
     covariance_Matrix(2, 0) = covariance_Matrix(0, 2);
     covariance_Matrix(2, 1) = covariance_Matrix(1, 2);
+    
     neighborhood.covariance = covariance_Matrix;
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(covariance_Matrix);
     Eigen::Vector3d normal(es.eigenvectors().col(0).normalized());
@@ -771,8 +772,8 @@ Neighborhood lioOptimization::computeNeighborhoodDistribution(const std::vector<
     double sigma_3 = sqrt(std::abs(es.eigenvalues()[0]));
     neighborhood.a2D = (sigma_2 - sigma_3) / sigma_1;
 
-    if (neighborhood.a2D != neighborhood.a2D) {
-        throw std::runtime_error("error");
+    if (std::isnan(neighborhood.a2D)) {
+        throw std::runtime_error("error: neighborhood.a2D is NaN");
     }
 
     return neighborhood;
@@ -817,7 +818,7 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> lioOptim
                     for (int i(0); i < voxel_block.NumPoints(); ++i) {
                         auto &neighbor = voxel_block.points[i];
                         double distance = (neighbor - point).norm();
-                        if (priority_queue.size() == max_num_neighbors) {
+                        if (priority_queue.size() == static_cast<size_t>(max_num_neighbors)) {
                             if (distance < std::get<0>(priority_queue.top())) {
                                 priority_queue.pop();
                                 priority_queue.emplace(distance, neighbor, voxel_temp);
@@ -835,13 +836,12 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> lioOptim
     if (voxels != nullptr) {
         voxels->resize(size);
     }
-    for (auto i = 0; i < size; ++i) {
+    for (size_t i = 0; i < size; ++i) {
         closest_neighbors[size - 1 - i] = std::get<1>(priority_queue.top());
         if (voxels != nullptr)
             (*voxels)[size - 1 - i] = std::get<2>(priority_queue.top());
         priority_queue.pop();
     }
-
 
     return closest_neighbors;
 }
@@ -858,7 +858,7 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> lioOptim
         }
     }
 
-    int real_number_neighbors = std::min(max_num_neighbors, (int) distance_neighbors.size());
+    int real_number_neighbors = std::min(max_num_neighbors, static_cast<int>(distance_neighbors.size()));
     std::partial_sort(distance_neighbors.begin(),
                       distance_neighbors.begin() + real_number_neighbors,
                       distance_neighbors.end(),
@@ -868,7 +868,7 @@ std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> lioOptim
                       });
 
     std::vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> neighbors(real_number_neighbors);
-    for (auto i(0); i < real_number_neighbors; ++i)
+    for (int i(0); i < real_number_neighbors; ++i)
         neighbors[i] = distance_neighbors[i].second;
     return neighbors;
 }
@@ -878,8 +878,8 @@ estimationSummary lioOptimization::optimize(cloudFrame *p_frame, const icpOption
     std::vector<point3D> keypoints;
     gridSampling(p_frame->point_frame, keypoints, sample_voxel_size);
 
-    auto num_keypoints = (int) keypoints.size();
-    summary.sample_size = num_keypoints;
+    auto num_keypoints = keypoints.size();
+    summary.sample_size = static_cast<int>(num_keypoints);
 
     {
         optimizeSummary optimize_summary;
@@ -904,6 +904,7 @@ estimationSummary lioOptimization::optimize(cloudFrame *p_frame, const icpOption
             transformPoint(options.motion_compensation, point_temp, q_begin, q_end, t_begin, t_end, R_imu_lidar, t_imu_lidar);
         }
     }
+    
     std::vector<point3D>().swap(summary.keypoints);
     summary.keypoints = keypoints;
     summary.state_frame->release();

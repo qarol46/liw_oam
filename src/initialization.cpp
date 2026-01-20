@@ -15,7 +15,7 @@ void lioOptimization::motionInitialization()
         initial_pose.block<3, 3>(0, 0) = all_cloud_frame[0]->p_state->rotation.toRotationMatrix();
         initial_pose.block<3, 1>(0, 3) = all_cloud_frame[0]->p_state->translation;
 
-        for (int i = 1; i < all_cloud_frame.size(); i++)
+        for (size_t i = 1; i < all_cloud_frame.size(); i++)
         {
             double dt = all_cloud_frame[i]->p_state->pre_integration->sum_dt;
             Eigen::Vector3d g_temp = all_cloud_frame[i]->p_state->pre_integration->delta_v / dt;
@@ -33,29 +33,29 @@ void lioOptimization::motionInitialization()
         }
 
         Eigen::Vector3d g_average;
-        g_average = g_sum * 1.0 / ((int)all_cloud_frame.size() - 1);
+        g_average = g_sum * 1.0 / (static_cast<int>(all_cloud_frame.size()) - 1);
 
         double variance = 0;
 
-        for (int i = 1; i < all_cloud_frame.size(); i++)
+        for (size_t i = 1; i < all_cloud_frame.size(); i++)
         {
             double dt = all_cloud_frame[i]->p_state->pre_integration->sum_dt;
             Eigen::Vector3d g_temp = all_cloud_frame[i]->p_state->pre_integration->delta_v / dt;
             variance += (g_temp - g_average).transpose() * (g_temp - g_average);
         }
 
-        variance = sqrt(variance / ((int)all_cloud_frame.size() - 1));
+        variance = sqrt(variance / (static_cast<int>(all_cloud_frame.size()) - 1));
 
         if(variance < 0.25)
         {
-            ROS_INFO("IMU excitation not enouth!");
+            RCLCPP_INFO(rclcpp::get_logger("lioOptimization"), "IMU excitation not enough!");
             return;
         }
 
         if(initialLidarStructure(v_lidar_pose))
             result = true;
         else
-            ROS_INFO("misalign lidar structure with IMU");
+            RCLCPP_INFO(rclcpp::get_logger("lioOptimization"), "misalign lidar structure with IMU");
 
         if(result == true)
             initial_flag = true;    
@@ -77,7 +77,7 @@ void lioOptimization::staticInitialization(cloudFrame *p_frame)
 
             assert(v_acc_static.size() == v_gyr_static.size());
 
-            for (int i = 0; i < v_acc_static.size(); i++)
+            for (size_t i = 0; i < v_acc_static.size(); i++)
             {
                 ba_sum += v_acc_static[i];
                 bg_sum += v_gyr_static[i];
@@ -86,7 +86,7 @@ void lioOptimization::staticInitialization(cloudFrame *p_frame)
             Eigen::Vector3d ba_avg = ba_sum / v_acc_static.size();
             Eigen::Vector3d bg_avg = bg_sum / v_gyr_static.size();
 
-            for (int i = 0; i < all_cloud_frame.size(); i++)
+            for (size_t i = 0; i < all_cloud_frame.size(); i++)
             {
                 all_cloud_frame[i]->p_state->velocity = Eigen::Vector3d::Zero();
                 all_cloud_frame[i]->p_state->ba = ba_avg;
@@ -113,7 +113,7 @@ void lioOptimization::staticInitialization(cloudFrame *p_frame)
 
             assert(v_acc_static.size() == v_gyr_static.size());
 
-            for (int i = 0; i < v_acc_static.size(); i++)
+            for (size_t i = 0; i < v_acc_static.size(); i++)
             {
                 g_sum += v_acc_static[i];
                 bg_sum += v_gyr_static[i];
@@ -135,7 +135,7 @@ void lioOptimization::staticInitialization(cloudFrame *p_frame)
             Eigen::Vector3d ba_avg = g_avg - Ro * G;
             G = Ro * G;
 
-            for (int i = 0; i < all_cloud_frame.size(); i++)
+            for (size_t i = 0; i < all_cloud_frame.size(); i++)
             {
                 all_cloud_frame[i]->p_state->velocity = Eigen::Vector3d::Zero();
                 all_cloud_frame[i]->p_state->ba = ba_avg;
@@ -174,11 +174,11 @@ bool lioOptimization::initialLidarStructure(std::vector<Eigen::Matrix4d, Eigen::
     bool result = lidarImuAlignment(v_lidar_pose, g, x);
     if(!result)
     {
-        ROS_INFO("solve g failed!");
+        RCLCPP_INFO(rclcpp::get_logger("lioOptimization"), "solve g failed!");
         return false;
     }
 
-    for (int i = 0; i < all_cloud_frame.size(); i++)
+    for (size_t i = 0; i < all_cloud_frame.size(); i++)
         all_cloud_frame[i]->p_state->velocity = all_cloud_frame[i]->p_state->rotation * x.segment<3>(3 * i);
 
     g = all_cloud_frame[0]->p_state->rotation.toRotationMatrix() * R_imu_lidar * g;
@@ -213,7 +213,7 @@ void lioOptimization::solveGyroscopeBias(std::vector<Eigen::Matrix4d, Eigen::ali
 
     assert(v_lidar_pose.size() == all_cloud_frame.size());
 
-    for (int i = 0; i < v_lidar_pose.size() - 1; i++)
+    for (size_t i = 0; i < v_lidar_pose.size() - 1; i++)
     {
         Eigen::Matrix3d temp_A = Eigen::Matrix3d::Zero();
         Eigen::Vector3d temp_b = Eigen::Vector3d::Zero();
@@ -232,7 +232,7 @@ void lioOptimization::solveGyroscopeBias(std::vector<Eigen::Matrix4d, Eigen::ali
     delta_bg = A.ldlt().solve(b);
     std::cout << "gyroscope bias initial calibration " << delta_bg.transpose() << std::endl;
     
-    for (int i = 0; i < all_cloud_frame.size(); i++)
+    for (size_t i = 0; i < all_cloud_frame.size(); i++)
     {
         all_cloud_frame[i]->p_state->bg += delta_bg;
         all_cloud_frame[i]->p_state->pre_integration->repropagate(all_cloud_frame[i]->p_state->ba, all_cloud_frame[i]->p_state->bg);
@@ -251,7 +251,7 @@ bool lioOptimization::linearAlignment(std::vector<Eigen::Matrix4d, Eigen::aligne
     A.setZero();
     b.setZero();
 
-    for (int i = 0; i < all_cloud_frame.size() - 1; i++)
+    for (size_t i = 0; i < all_cloud_frame.size() - 1; i++)
     {
         Eigen::Matrix<double, 6, 9> temp_A = Eigen::MatrixXd::Zero(6, 9);
         Eigen::Matrix<double, 6, 1> temp_b = Eigen::MatrixXd::Zero(6, 1);
@@ -331,7 +331,7 @@ void lioOptimization::refineGravity(std::vector<Eigen::Matrix4d, Eigen::aligned_
     {
         Eigen::Matrix<double, 3, 2> lxly = tangentBasis(g0);
 
-        for (int i = 0; i < all_cloud_frame.size() - 1; i++)
+        for (size_t i = 0; i < all_cloud_frame.size() - 1; i++)
         {
             Eigen::Matrix<double, 6, 8> temp_A = Eigen::MatrixXd::Zero(6, 8);
             Eigen::Matrix<double, 6, 1> temp_b = Eigen::MatrixXd::Zero(6, 1);

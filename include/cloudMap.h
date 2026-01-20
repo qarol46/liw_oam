@@ -1,11 +1,12 @@
 #pragma once
 // c++
 #include <iostream>
-#include <math.h>
+#include <cmath>
 #include <thread>
 #include <fstream>
 #include <vector>
 #include <queue>
+#include <cassert>
 
 // eigen 
 #include <Eigen/Core>

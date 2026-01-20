@@ -1,11 +1,11 @@
 #pragma once
 // c++
 #include <iostream>
-#include <math.h>
+#include <cmath>
 
-// ros
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
+// ROS2
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 // eigen 
 #include <Eigen/Core>
@@ -92,9 +92,8 @@ private:
 
 	// function
 	void resetVector();
-	void oust64Handler(const sensor_msgs::PointCloud2::ConstPtr &msg, std::vector<std::vector<point3D>> &v_cloud_out);
-	void velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg, std::vector<std::vector<point3D>> &v_cloud_out, std::vector<double> &v_dt_offset);
-
+	void oust64Handler(const sensor_msgs::msg::PointCloud2::SharedPtr msg, std::vector<std::vector<point3D>> &v_cloud_out);
+	void velodyneHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg, std::vector<std::vector<point3D>> &v_cloud_out, std::vector<double> &v_dt_offset);
 
 public:
 
@@ -118,5 +117,5 @@ public:
 
 	bool isPointTimeEnable() {return given_offset_time;}
 
-	void process(const sensor_msgs::PointCloud2::ConstPtr &msg, std::vector<std::vector<point3D>> &v_cloud_out, std::vector<double> &v_dt_offset);
+	void process(const sensor_msgs::msg::PointCloud2::SharedPtr msg, std::vector<std::vector<point3D>> &v_cloud_out, std::vector<double> &v_dt_offset);
 };
